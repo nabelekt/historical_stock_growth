@@ -1,3 +1,6 @@
+MARKET_FOR_HOLIDAYS = 'NASDAQ'
+
+
 import argparse
 import sys
 import os
@@ -6,6 +9,7 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import pandas_market_calendars as mcal
 import functools
 print = functools.partial(print, flush=True)  # Prevent print statements from buffering till end of execution
 
@@ -76,6 +80,7 @@ def open_and_read_tickers_file(args):
     
     return tickers
 
+
 def get_prices(dates, tickers):
 
     # yfinance's history() 'end' argument must be 1 day after the start to get just the data for the start date, so get those end dates
@@ -85,8 +90,9 @@ def get_prices(dates, tickers):
     tmp_columns = ['ticker', current_label] + dates
     df = pd.DataFrame(columns=tmp_columns)
 
-    for ticker in tickers:
+    for ticker_idx, ticker in enumerate(tickers):
 
+        print(f"\n  Getting data for {ticker} ({ticker_idx+1}/{len(tickers)})...")
         ticker_data = yf.Ticker(ticker)
 
         close_vals = []
@@ -94,26 +100,14 @@ def get_prices(dates, tickers):
         for date_idx, date in enumerate(dates):
             vals_on_date_df = ticker_data.history(period='1d', start=date, end=end_dates[date_idx], debug=False)
             
-            try_attempts = 1
-            new_date = date
-
-            while (vals_on_date_df.empty and try_attempts < 3):  # Allow only 3 trys for Saturday, Sunday, and a market holiday
-                
-                timestamp = int(datetime.strptime(new_date, "%Y-%m-%d").timestamp())
-                timestamp1 = timestamp - 60*60*24*3
-                timestamp2 = timestamp + 60*60*24*3
-                print(f"  No data found for {ticker} on {new_date}, see: https://finance.yahoo.com/quote/{ticker}/history?period1={timestamp1}&period2={timestamp2}. ", end="")
-
-                new_end_date = new_date
-                new_date = (datetime.strptime(new_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')  # Subtract one day
-                print(f"Using {new_date} instead.")
-                vals_on_date_df = ticker_data.history(period='1d', start=new_date, end=new_end_date, debug=False)
-                try_attempts += 1
-
             if not vals_on_date_df.empty:
                 close_vals.append(vals_on_date_df['Close'].iloc[0])
-                dates[date_idx] = new_date  # This will change the date for all tickers after this one
             else:
+                timestamp = int(datetime.strptime(date, "%Y-%m-%d").timestamp())
+                timestamp1 = timestamp - 60*60*24*3  # 3 days before
+                timestamp2 = timestamp + 60*60*24*3  # 3 days ahead
+                print(f"  No data found for {ticker} on {date}, see: https://finance.yahoo.com/quote/{ticker}/history?period1={timestamp1}&period2={timestamp2}.")
+                
                 close_vals.append(np.NaN)
 
         current_price = ticker_data.info['regularMarketPrice']
@@ -125,6 +119,24 @@ def get_prices(dates, tickers):
     df.columns = ['ticker', current_label] + date_column_labels
 
     return df
+
+
+# If the specified date was a weekend day or market holiday, use the next previous market day instead
+def check_dates(dates):
+
+    market_holidays = mcal.get_calendar(MARKET_FOR_HOLIDAYS).holidays().holidays
+    market_holidays = [pd.to_datetime(holiday).strftime('%Y-%m-%d') for holiday in market_holidays]
+    
+    for date_idx, date in enumerate(dates):
+
+        while((date in market_holidays) or (datetime.strptime(date, "%Y-%m-%d").weekday() > 4)):  # weekday() returns 0-4 for Monday-Friday
+            print(f"  {date} was on a weekend or was a market holiday. Using ", end="")
+            date = (datetime.strptime(date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')  # Subtract one day
+            print(f"{date}.")
+
+        dates[date_idx] = date
+
+    return dates
 
 
 def calculate_returns(df):
@@ -162,13 +174,50 @@ def calculate_return(current_val, initial_val):
     return (current_val - initial_val) / initial_val * 100
 
 
+def append_period_headers(df):
+
+    # print(df)
+
+    now = datetime.now()
+    dates = [datetime.strptime(col_name[0:10], '%Y-%m-%d') for col_name in list(df.columns)[1:]]
+
+    num_days_list = [(now - date).days for date in dates]
+
+    period_headers = ['', '']  # '' and '' for ticker column and for current price column
+
+    for num_days in num_days_list:
+        if num_days >= 365:
+            num_years = round(num_days/365.25, 1)  # Round to 1 decimal place; .25 to account for leap years
+            period_headers.append(f"{num_years} years")
+        else:
+            period_headers.append(f"{num_days} days")
+    
+    period_df = pd.DataFrame([period_headers])
+    # print(period_df)
+    # df = pd.concat([df.iloc[:1], period_df, df.iloc[1:]])#.reset_index(drop=True)
+
+    # sys.exit()
+    
+    return df
+
+
+# Drop close prices from df
+def drop_close_prices(args, df):
+    
+    if not args.include_close_prices:
+        cols = df.columns
+        cols_to_keep = [col for col in cols if not col.endswith('close')]
+        df = df[cols_to_keep]
+
+    return df
+
+
 def dfs_to_csv(df, output_file_path, verbose=False):
 
     df.to_csv(output_file_path, index=False)#, float_format="%.3f")
 
     if verbose:
         print(f" Data written to '{output_file_path}'.")
-
 
 
 def main():
@@ -182,14 +231,11 @@ def main():
     print("done.")
     
     print("\nFetching and processing data...")
+    dates = check_dates(dates)
     df = get_prices(dates, tickers)
     df = calculate_returns(df)
-
-    if not args.include_close_prices:  # Drop close prices from output
-        cols = df.columns
-        cols_to_keep = [col for col in cols if not col.endswith('close')]
-        df = df[cols_to_keep]
-
+    df = append_period_headers(df)
+    df = drop_close_prices(args, df)
     print("done.")
     
     print("\nWriting data to CSV file...")
