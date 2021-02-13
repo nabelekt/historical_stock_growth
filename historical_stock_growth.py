@@ -1,4 +1,4 @@
-MARKET_FOR_HOLIDAYS = 'NASDAQ'
+MARKET_FOR_HOLIDAYS = 'NASDAQ'  # Market holidays are based on holidays for this market
 
 
 import argparse
@@ -12,6 +12,7 @@ import yfinance as yf
 import pandas_market_calendars as mcal
 import functools
 print = functools.partial(print, flush=True)  # Prevent print statements from buffering till end of execution
+
 
 
 def parse_and_validate_args():
@@ -81,14 +82,18 @@ def open_and_read_tickers_file(args):
     return tickers
 
 
+# TODO: This function is slow, profile to see how it can be improved. Probably not much the slow part is probably: ticker_data = yf.Ticker(ticker)
 def get_prices(dates, tickers):
 
     # yfinance's history() 'end' argument must be 1 day after the start to get just the data for the start date, so get those end dates
     end_dates = [(datetime.strptime(date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d') for date in dates]  # Subtract one day from each date
 
     current_label = datetime.now().strftime('%Y-%m-%d %H:%M') + ' price'
-    tmp_columns = ['ticker', current_label] + dates
-    df = pd.DataFrame(columns=tmp_columns)
+    start_column_labels = ['ticker', 'name', current_label]
+    global num_start_cols
+    num_start_cols = len(start_column_labels)
+    tmp_column_labels = start_column_labels + dates
+    df = pd.DataFrame(columns=tmp_column_labels)
 
     for ticker_idx, ticker in enumerate(tickers):
 
@@ -110,13 +115,14 @@ def get_prices(dates, tickers):
                 
                 close_vals.append(np.NaN)
 
-        current_price = ticker_data.info['regularMarketPrice']
-        # current_price = ticker_data.info['ask']
-        df.loc[len(df)] = [ticker, current_price] + close_vals
+        # current_price = ticker_data.info['regularMarketPrice']
+        current_price = ticker_data.info['ask']
+        name = ticker_data.info['longName']
+        df.loc[len(df)] = [ticker, name, current_price] + close_vals
         
     # Some different dates may have been used, so fix column labels
     date_column_labels = [date + ' close' for date in dates]
-    df.columns = ['ticker', current_label] + date_column_labels
+    df.columns = start_column_labels + date_column_labels
 
     return df
 
@@ -148,9 +154,9 @@ def calculate_returns(df):
     df = pd.concat([df, returns_df], axis=1).sort_index(axis=1, ascending=False)
     
     # Rearrange columns so that close price precedes each respective return value
-    return_cols = df.columns[2::2]
-    close_cols  = df.columns[3::2]
-    reordered_cols = list(df.columns[0:2])
+    return_cols = df.columns[num_start_cols::2]
+    close_cols  = df.columns[num_start_cols+1::2]
+    reordered_cols = list(df.columns[0:num_start_cols])
     reordered_cols = reordered_cols + [col for idx, _ in enumerate(return_cols) for col in [close_cols[idx], return_cols[idx]]]
     df = df[reordered_cols]
 
@@ -159,11 +165,12 @@ def calculate_returns(df):
 
 def calculate_return_row(row: pd.Series):
 
-    current_price = row[1]
-    close_prices  = row[2:]
+    price_idx = [idx for idx, label in enumerate(list(row.index)) if 'price' in label][0]
+    current_price = row[price_idx]
+    close_prices  = row[num_start_cols:]
     
     returns = [calculate_return(current_price, close_price) for close_price in close_prices]
-    index = [label.replace('close', 'return') for label in row.index[2:]]
+    index = [label.replace('close', 'return') for label in row.index[num_start_cols:]]
     returns = pd.Series(returns, index=index)
 
     return returns
@@ -176,14 +183,12 @@ def calculate_return(current_val, initial_val):
 
 def append_period_headers(df):
 
-    # print(df)
-
     now = datetime.now()
-    dates = [datetime.strptime(col_name[0:10], '%Y-%m-%d') for col_name in list(df.columns)[1:]]
+    dates = [datetime.strptime(col_name[0:10], '%Y-%m-%d') for col_name in list(df.columns)[num_start_cols:]]
 
     num_days_list = [(now - date).days for date in dates]
 
-    period_headers = ['', '']  # '' and '' for ticker column and for current price column
+    period_headers = [''] * num_start_cols
 
     for num_days in num_days_list:
         if num_days >= 365:
@@ -193,10 +198,9 @@ def append_period_headers(df):
             period_headers.append(f"{num_days} days")
     
     period_df = pd.DataFrame([period_headers])
-    # print(period_df)
-    # df = pd.concat([df.iloc[:1], period_df, df.iloc[1:]])#.reset_index(drop=True)
+    period_df.columns = df.columns
 
-    # sys.exit()
+    df = pd.concat([period_df.reset_index(drop=True), df.reset_index(drop=True)], axis=0)
     
     return df
 
