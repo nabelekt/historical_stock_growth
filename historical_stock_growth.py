@@ -17,10 +17,12 @@ def parse_and_validate_args():
                             help="file system path to file containing the list of tickers")
     parser.add_argument("csv_output_filepath",
                             help="file system path for output CSV file")
+    parser.add_argument("include_close_prices",
+                            choices=['0', '1'],
+                            help="boolean flag indicating if close prices for each date should be included in output")
     parser.add_argument("periods",
                             nargs='*',
                             help="numbers of days or years to find growth over, e.g.: 30 90 360 2y 5y")
-
 
     args = parser.parse_args()
 
@@ -43,6 +45,8 @@ def parse_and_validate_args():
                 args.day_periods.append(int(period))
         except ValueError:
             sys.exit(f"\nERROR: period argument '{period}' is invalid. Only integer values are allowed.\n\nExiting.\n")
+
+    args.include_close_prices = int(args.include_close_prices)
 
     return args
 
@@ -77,7 +81,7 @@ def get_prices(dates, tickers):
     # yfinance's history() 'end' argument must be 1 day after the start to get just the data for the start date, so get those end dates
     end_dates = [(datetime.strptime(date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d') for date in dates]  # Subtract one day from each date
 
-    current_label = datetime.now().strftime('%Y-%m-%d %H:%M')
+    current_label = datetime.now().strftime('%Y-%m-%d %H:%M') + ' price'
     tmp_columns = ['ticker', current_label] + dates
     df = pd.DataFrame(columns=tmp_columns)
 
@@ -112,11 +116,12 @@ def get_prices(dates, tickers):
             else:
                 close_vals.append(np.NaN)
 
-        current_price = ticker_data.info['ask']
+        current_price = ticker_data.info['regularMarketPrice']
+        # current_price = ticker_data.info['ask']
         df.loc[len(df)] = [ticker, current_price] + close_vals
         
     # Some different dates may have been used, so fix column labels
-    date_column_labels = [date + '_close' for date in dates]
+    date_column_labels = [date + ' close' for date in dates]
     df.columns = ['ticker', current_label] + date_column_labels
 
     return df
@@ -124,17 +129,45 @@ def get_prices(dates, tickers):
 
 def calculate_returns(df):
 
+    # Get dataframe of return values
+    returns_df = df.apply(calculate_return_row, axis=1)
     
+    # Append returns df to close prices df
+    df = pd.concat([df, returns_df], axis=1).sort_index(axis=1, ascending=False)
+    
+    # Rearrange columns so that close price precedes each respective return value
+    return_cols = df.columns[2::2]
+    close_cols  = df.columns[3::2]
+    reordered_cols = list(df.columns[0:2])
+    reordered_cols = reordered_cols + [col for idx, _ in enumerate(return_cols) for col in [close_cols[idx], return_cols[idx]]]
+    df = df[reordered_cols]
 
     return df
 
 
+def calculate_return_row(row: pd.Series):
+
+    current_price = row[1]
+    close_prices  = row[2:]
+    
+    returns = [calculate_return(current_price, close_price) for close_price in close_prices]
+    index = [label.replace('close', 'return') for label in row.index[2:]]
+    returns = pd.Series(returns, index=index)
+
+    return returns
+
+
+def calculate_return(current_val, initial_val):
+
+    return (current_val - initial_val) / initial_val * 100
+
+
 def dfs_to_csv(df, output_file_path, verbose=False):
 
-    df.to_csv(output_file_path, index=False, float_format="%.3f")
+    df.to_csv(output_file_path, index=False)#, float_format="%.3f")
 
     if verbose:
-        print(f"Data written to '{output_file_path}'.")
+        print(f" Data written to '{output_file_path}'.")
 
 
 
@@ -151,11 +184,15 @@ def main():
     print("\nFetching and processing data...")
     df = get_prices(dates, tickers)
     df = calculate_returns(df)
-    print("done.")
 
-    print(df)
+    if not args.include_close_prices:  # Drop close prices from output
+        cols = df.columns
+        cols_to_keep = [col for col in cols if not col.endswith('close')]
+        df = df[cols_to_keep]
+
+    print("done.")
     
-    print("\nWriting data to CSV file... ", end="")
+    print("\nWriting data to CSV file...")
     dfs_to_csv(df, args.csv_output_filepath, verbose=True)
     print("done.")
 
